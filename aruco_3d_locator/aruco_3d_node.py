@@ -21,7 +21,7 @@ class Aruco3DNode(Node):
         # 토픽 설정
         self.declare_parameter("color_topic", "/camera_r/camera_r/color/image_rect_raw/compressed")
         self.declare_parameter("depth_topic", "/camera_r/camera_r/aligned_depth_to_color/image_raw")
-        self.declare_parameter("camera_info_topic", "/camera_r/camera_r/depth/camera_info")
+        self.declare_parameter("camera_info_topic", "/camera_r/camera_r/color/camera_info")
         self.declare_parameter("target_marker_id", 0) # ID 0번 추적
         self.declare_parameter("depth_patch_size", 5)
 
