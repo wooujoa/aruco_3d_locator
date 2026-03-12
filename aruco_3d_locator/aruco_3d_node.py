@@ -23,16 +23,22 @@ class Aruco3DNode(Node):
         self.declare_parameter("color_topic", "/camera_r/camera_r/color/image_rect_raw/compressed")
         self.declare_parameter("depth_topic", "/camera_r/camera_r/aligned_depth_to_color/image_raw")
         self.declare_parameter("camera_info_topic", "/camera_r/camera_r/color/camera_info")
-        self.declare_parameter("target_marker_id", 0)   # ID 0번 추적
-        self.declare_parameter("depth_patch_size", 15)  # 기존 5 -> 15
+
+        self.declare_parameter("target_marker_id", 0)
+        self.declare_parameter("depth_patch_size", 15)
         self.declare_parameter("enable_verbose_log", True)
+
+        # solvePnP fallback용
+        self.declare_parameter("marker_size_m", 0.0625)  # 실제 마커 한 변 길이(m)
 
         self.color_topic = self.get_parameter("color_topic").value
         self.depth_topic = self.get_parameter("depth_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
+
         self.target_marker_id = int(self.get_parameter("target_marker_id").value)
         self.depth_patch_size = int(self.get_parameter("depth_patch_size").value)
         self.enable_verbose_log = bool(self.get_parameter("enable_verbose_log").value)
+        self.marker_size_m = float(self.get_parameter("marker_size_m").value)
 
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
@@ -47,6 +53,7 @@ class Aruco3DNode(Node):
         self.bridge = CvBridge()
         self.latest_depth_msg = None
         self.camera_info = None
+        self._depth_info_logged = False
 
         # Subscription
         self.sub_color = self.create_subscription(
@@ -64,8 +71,9 @@ class Aruco3DNode(Node):
 
         self.get_logger().info(
             f"🚀 ArUco 3D Node Started | target_id={self.target_marker_id}, "
-            f"patch={self.depth_patch_size}, color_topic={self.color_topic}, "
-            f"depth_topic={self.depth_topic}, info_topic={self.camera_info_topic}"
+            f"marker_size={self.marker_size_m:.4f}m, patch={self.depth_patch_size}, "
+            f"color_topic={self.color_topic}, depth_topic={self.depth_topic}, "
+            f"info_topic={self.camera_info_topic}"
         )
 
     def info_cb(self, msg: CameraInfo):
@@ -75,6 +83,12 @@ class Aruco3DNode(Node):
 
     def depth_cb(self, msg: Image):
         self.latest_depth_msg = msg
+
+        if not self._depth_info_logged:
+            self.get_logger().info(
+                f"[DEPTH_CB] encoding={msg.encoding}, width={msg.width}, height={msg.height}"
+            )
+            self._depth_info_logged = True
 
     def color_cb(self, msg: CompressedImage):
         if self.camera_info is None:
@@ -108,6 +122,7 @@ class Aruco3DNode(Node):
             cv2.aruco.drawDetectedMarkers(overlay, corners, ids)
 
             try:
+                # 네가 원한 방식 유지: passthrough
                 cv_depth = self.bridge.imgmsg_to_cv2(
                     self.latest_depth_msg, desired_encoding="passthrough"
                 )
@@ -122,91 +137,150 @@ class Aruco3DNode(Node):
                     self.get_logger().info(
                         f"[SHAPE] color=({color_w}x{color_h}) "
                         f"depth=({depth_w}x{depth_h}) "
-                        f"encoding={self.latest_depth_msg.encoding}"
+                        f"encoding={self.latest_depth_msg.encoding} "
+                        f"dtype={cv_depth.dtype} "
+                        f"shape={cv_depth.shape}"
                     )
                     self.get_logger().info(
                         f"[STAMP] color={msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}, "
                         f"depth={self.latest_depth_msg.header.stamp.sec}.{self.latest_depth_msg.header.stamp.nanosec:09d}"
                     )
 
+                use_raw_depth = self.latest_depth_msg.encoding in ("16UC1", "32FC1")
+
+                if not use_raw_depth:
+                    self.get_logger().warn(
+                        f"[DEPTH_WARNING] depth topic encoding is '{self.latest_depth_msg.encoding}'. "
+                        "Raw depth(16UC1/32FC1)가 아니므로 solvePnP tvec fallback을 사용합니다."
+                    )
+
                 for idx, marker_id in enumerate(ids.flatten()):
                     if int(marker_id) != self.target_marker_id:
                         continue
 
-                    c = corners[idx][0]  # shape: (4,2)
+                    c = corners[idx][0]  # (4,2)
                     u = int(np.mean(c[:, 0]))
                     v = int(np.mean(c[:, 1]))
 
                     self.get_logger().info(f"🎯 Target ID {marker_id} at Pixel: ({u}, {v})")
-
-                    # 중심점 표시
                     cv2.circle(overlay, (u, v), 4, (0, 255, 255), -1)
 
-                    # depth 추출: 마커 내부 5지점 샘플링
-                    depth_m, sample_points = self._sample_marker_depth_m(
-                        cv_depth=cv_depth,
-                        encoding=self.latest_depth_msg.encoding,
-                        corners=c,
-                        color_shape=(color_h, color_w),
-                        depth_shape=(depth_h, depth_w),
-                    )
+                    depth_m = None
+                    sample_points = []
 
-                    # 샘플 포인트 시각화
-                    for i, (cu, cvv, du, dv) in enumerate(sample_points):
-                        cv2.circle(overlay, (cu, cvv), 3, (255, 0, 255), -1)
-                        cv2.putText(
-                            overlay,
-                            f"s{i}",
-                            (cu + 3, cvv - 3),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.4,
-                            (255, 0, 255),
-                            1,
+                    if use_raw_depth:
+                        depth_m, sample_points = self._sample_marker_depth_m(
+                            cv_depth=cv_depth,
+                            encoding=self.latest_depth_msg.encoding,
+                            corners=c,
+                            color_shape=(color_h, color_w),
+                            depth_shape=(depth_h, depth_w),
                         )
+
+                        for i, (cu, cvv, du, dv) in enumerate(sample_points):
+                            cv2.circle(overlay, (cu, cvv), 3, (255, 0, 255), -1)
+                            cv2.putText(
+                                overlay,
+                                f"s{i}",
+                                (cu + 3, cvv - 3),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.4,
+                                (255, 0, 255),
+                                1,
+                            )
 
                     if depth_m is not None:
+                        # raw depth 성공
                         x_m = (u - cx) * depth_m / fx
                         y_m = (v - cy) * depth_m / fy
-
-                        out = PointStamped()
-                        out.header = self.latest_depth_msg.header
-                        out.point.x = float(x_m)
-                        out.point.y = float(y_m)
-                        out.point.z = float(depth_m)
-                        self.pub_point.publish(out)
-
-                        self.get_logger().info(
-                            f"🟢 [SUCCESS] ID:{marker_id} -> X:{x_m:.3f}, Y:{y_m:.3f}, Z:{depth_m:.3f}m"
-                        )
-
-                        cv2.putText(
-                            overlay,
-                            f"ID:{marker_id} Z:{depth_m:.3f}m",
-                            (u, max(v - 10, 20)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 255, 0),
-                            2,
-                        )
+                        z_m = depth_m
+                        source = "raw_depth"
                     else:
-                        self.get_logger().warn(
-                            f"⚠️ [DEPTH_FAIL] No valid depth around marker center ({u}, {v}). "
-                            f"Check patch/raw depth/timestamp alignment."
-                        )
-                        cv2.putText(
-                            overlay,
-                            f"ID:{marker_id} depth_fail",
-                            (u, max(v - 10, 20)),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.5,
-                            (0, 0, 255),
-                            2,
-                        )
+                        # fallback: solvePnP tvec 사용
+                        tvec = self._estimate_marker_tvec(c)
+                        if tvec is None:
+                            self.get_logger().warn(
+                                f"⚠️ [POSE_FAIL] solvePnP fallback also failed for ID:{marker_id}"
+                            )
+                            cv2.putText(
+                                overlay,
+                                f"ID:{marker_id} pose_fail",
+                                (u, max(v - 10, 20)),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.5,
+                                (0, 0, 255),
+                                2,
+                            )
+                            continue
+
+                        x_m = float(tvec[0])
+                        y_m = float(tvec[1])
+                        z_m = float(tvec[2])
+                        source = "solvePnP"
+
+                    out = PointStamped()
+                    out.header = self.latest_depth_msg.header
+                    out.point.x = float(x_m)
+                    out.point.y = float(y_m)
+                    out.point.z = float(z_m)
+                    self.pub_point.publish(out)
+
+                    self.get_logger().info(
+                        f"🟢 [SUCCESS:{source}] ID:{marker_id} -> "
+                        f"X:{x_m:.3f}, Y:{y_m:.3f}, Z:{z_m:.3f}m"
+                    )
+
+                    text_color = (0, 255, 0) if source == "raw_depth" else (0, 200, 255)
+                    cv2.putText(
+                        overlay,
+                        f"ID:{marker_id} {source} Z:{z_m:.3f}m",
+                        (u, max(v - 10, 20)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        text_color,
+                        2,
+                    )
 
             except Exception as e:
                 self.get_logger().error(f"❌ Processing Error: {e}")
 
         self._publish_debug(overlay, msg.header)
+
+    def _estimate_marker_tvec(self, corners):
+        """
+        depth를 못 쓸 때 solvePnP로 마커 중심까지의 tvec 추정.
+        반환값: np.array([x, y, z]) in meters
+        """
+        if self.camera_info is None:
+            return None
+
+        camera_matrix = np.array(self.camera_info.k, dtype=np.float32).reshape(3, 3)
+        dist_coeffs = np.array(self.camera_info.d, dtype=np.float32)
+
+        marker_size = self.marker_size_m
+        object_points = np.array([
+            [-marker_size / 2.0,  marker_size / 2.0, 0.0],
+            [ marker_size / 2.0,  marker_size / 2.0, 0.0],
+            [ marker_size / 2.0, -marker_size / 2.0, 0.0],
+            [-marker_size / 2.0, -marker_size / 2.0, 0.0],
+        ], dtype=np.float32)
+
+        image_points = corners.astype(np.float32)
+
+        try:
+            success, rvec, tvec = cv2.solvePnP(
+                object_points,
+                image_points,
+                camera_matrix,
+                dist_coeffs,
+                flags=cv2.SOLVEPNP_IPPE_SQUARE,
+            )
+            if not success:
+                return None
+            return tvec.reshape(3)
+        except Exception as e:
+            self.get_logger().warn(f"[solvePnP] failed: {e}")
+            return None
 
     def _scale_to_depth(self, u, v, color_shape, depth_shape):
         color_h, color_w = color_shape
@@ -222,11 +296,9 @@ class Aruco3DNode(Node):
     def _sample_marker_depth_m(self, cv_depth, encoding, corners, color_shape, depth_shape):
         pts = corners.astype(np.float32)
 
-        # corners: [top-left, top-right, bottom-right, bottom-left] 형태를 기대
         center = np.mean(pts, axis=0)
         p0, p1, p2, p3 = pts
 
-        # 중심 + 각 코너 방향 안쪽 4개
         sample_points_color = [
             center,
             0.7 * center + 0.3 * p0,
@@ -303,7 +375,6 @@ class Aruco3DNode(Node):
                 return float(np.median(vals))
 
             else:
-                self.get_logger().warn(f"[DEPTH_FAIL] Unsupported depth encoding: {encoding}")
                 return None
 
         except Exception as e:
