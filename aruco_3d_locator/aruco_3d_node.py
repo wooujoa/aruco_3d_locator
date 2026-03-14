@@ -59,6 +59,10 @@ class Aruco3DNode(Node):
         self.declare_parameter("log_every_n_frames", 30)
         self.declare_parameter("warn_if_time_diff_ms", 100.0)
 
+        # optical center 표시 관련
+        self.declare_parameter("draw_camera_center", True)
+        self.declare_parameter("camera_center_cross_size", 15)
+
         self.color_topic = self.get_parameter("color_topic").value
         self.depth_topic = self.get_parameter("depth_topic").value
         self.camera_info_topic = self.get_parameter("camera_info_topic").value
@@ -69,6 +73,9 @@ class Aruco3DNode(Node):
         self.debug = bool(self.get_parameter("debug").value)
         self.log_every_n_frames = int(self.get_parameter("log_every_n_frames").value)
         self.warn_if_time_diff_ms = float(self.get_parameter("warn_if_time_diff_ms").value)
+
+        self.draw_camera_center = bool(self.get_parameter("draw_camera_center").value)
+        self.camera_center_cross_size = int(self.get_parameter("camera_center_cross_size").value)
 
         dict_name = self.get_parameter("aruco_dict").value
         dict_id = DICT_MAP.get(dict_name, cv2.aruco.DICT_4X4_50)
@@ -120,15 +127,16 @@ class Aruco3DNode(Node):
 
         self.get_logger().info("========================================")
         self.get_logger().info("✅ ArUco 3D Node Started")
-        self.get_logger().info(f"  color_topic      : {self.color_topic}")
-        self.get_logger().info(f"  depth_topic      : {self.depth_topic}")
-        self.get_logger().info(f"  camera_info_topic: {self.camera_info_topic}")
-        self.get_logger().info(f"  aruco_dict       : {dict_name}")
-        self.get_logger().info(f"  target_marker_id : {self.target_marker_id}")
-        self.get_logger().info(f"  depth_patch_size : {self.depth_patch_size}")
-        self.get_logger().info(f"  debug            : {self.debug}")
+        self.get_logger().info(f"  color_topic         : {self.color_topic}")
+        self.get_logger().info(f"  depth_topic         : {self.depth_topic}")
+        self.get_logger().info(f"  camera_info_topic   : {self.camera_info_topic}")
+        self.get_logger().info(f"  aruco_dict          : {dict_name}")
+        self.get_logger().info(f"  target_marker_id    : {self.target_marker_id}")
+        self.get_logger().info(f"  depth_patch_size    : {self.depth_patch_size}")
+        self.get_logger().info(f"  draw_camera_center  : {self.draw_camera_center}")
+        self.get_logger().info(f"  debug               : {self.debug}")
         self.get_logger().info(
-            f"  detector_api     : {'new' if self.use_new_detector_api else 'legacy'}"
+            f"  detector_api        : {'new' if self.use_new_detector_api else 'legacy'}"
         )
         self.get_logger().info("========================================")
 
@@ -161,16 +169,12 @@ class Aruco3DNode(Node):
 
         if self.latest_depth_msg is None:
             if self.debug and (self.color_frame_count % self.log_every_n_frames == 0):
-                self.get_logger().warn(
-                    "⏳ Skip color frame: latest_depth_msg is None"
-                )
+                self.get_logger().warn("⏳ Skip color frame: latest_depth_msg is None")
             return
 
         if self.camera_info is None:
             if self.debug and (self.color_frame_count % self.log_every_n_frames == 0):
-                self.get_logger().warn(
-                    "⏳ Skip color frame: camera_info is None"
-                )
+                self.get_logger().warn("⏳ Skip color frame: camera_info is None")
             return
 
         if self.debug and (self.color_frame_count % self.log_every_n_frames == 0):
@@ -206,6 +210,11 @@ class Aruco3DNode(Node):
             self.get_logger().error(f"❌ Decoding failed: {repr(e)}")
             return
 
+        overlay = bgr.copy()
+
+        # optical center 먼저 표시
+        self._draw_camera_center(overlay)
+
         # 2) ArUco detection
         try:
             if self.use_new_detector_api:
@@ -218,9 +227,8 @@ class Aruco3DNode(Node):
                 )
         except Exception as e:
             self.get_logger().error(f"❌ ArUco detection failed: {repr(e)}")
+            self._publish_debug(overlay, msg.header)
             return
-
-        overlay = bgr.copy()
 
         if ids is None or len(ids) == 0:
             self.detect_fail_count += 1
@@ -277,9 +285,7 @@ class Aruco3DNode(Node):
             cy = float(self.camera_info.k[5])
 
             if fx == 0.0 or fy == 0.0:
-                self.get_logger().error(
-                    f"❌ Invalid intrinsics: fx={fx}, fy={fy}"
-                )
+                self.get_logger().error(f"❌ Invalid intrinsics: fx={fx}, fy={fy}")
                 self._publish_debug(overlay, msg.header)
                 return
         except Exception as e:
@@ -313,6 +319,9 @@ class Aruco3DNode(Node):
                     f"(u,v)=({u},{v}), depth_size=({w},{h})"
                 )
                 continue
+
+            # optical center와 marker center 선 연결
+            self._draw_marker_vs_camera_center(overlay, u, v, cx, cy)
 
             # 6) Depth extraction
             depth_m = self._median_depth_m(
@@ -372,7 +381,7 @@ class Aruco3DNode(Node):
 
             # 9) Debug overlay
             try:
-                cv2.circle(overlay, (u, v), 4, (0, 255, 0), -1)
+                cv2.circle(overlay, (u, v), 5, (0, 255, 0), -1)
                 cv2.putText(
                     overlay,
                     f"ID:{marker_id} X:{x_m:.3f} Y:{y_m:.3f} Z:{z_m:.3f}",
@@ -380,6 +389,18 @@ class Aruco3DNode(Node):
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,
                     (0, 255, 0),
+                    2
+                )
+
+                pixel_dx = u - int(round(cx))
+                pixel_dy = v - int(round(cy))
+                cv2.putText(
+                    overlay,
+                    f"dPix=({pixel_dx},{pixel_dy})",
+                    (u, min(overlay.shape[0] - 10, v + 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (255, 255, 0),
                     2
                 )
             except Exception as e:
@@ -394,6 +415,55 @@ class Aruco3DNode(Node):
 
         self._publish_debug(overlay, msg.header)
 
+    def _draw_camera_center(self, img):
+        if not self.draw_camera_center or self.camera_info is None:
+            return
+
+        try:
+            cx = int(round(float(self.camera_info.k[2])))
+            cy = int(round(float(self.camera_info.k[5])))
+
+            h, w = img.shape[:2]
+            if not (0 <= cx < w and 0 <= cy < h):
+                self.get_logger().warn(
+                    f"⚠️ Camera center out of image bounds: (cx,cy)=({cx},{cy}), size=({w},{h})"
+                )
+                return
+
+            s = self.camera_center_cross_size
+
+            # 중심점 표시: 빨간 점 + 십자선
+            cv2.circle(img, (cx, cy), 6, (0, 0, 255), -1)
+            cv2.line(img, (cx - s, cy), (cx + s, cy), (0, 0, 255), 2)
+            cv2.line(img, (cx, cy - s), (cx, cy + s), (0, 0, 255), 2)
+
+            cv2.putText(
+                img,
+                f"CAM (0,0) = ({cx},{cy})",
+                (max(5, cx + 10), max(20, cy - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (0, 0, 255),
+                2
+            )
+        except Exception as e:
+            self.get_logger().warn(f"⚠️ Failed to draw camera center: {repr(e)}")
+
+    def _draw_marker_vs_camera_center(self, img, u, v, cx, cy):
+        try:
+            cx_i = int(round(cx))
+            cy_i = int(round(cy))
+
+            # optical center -> marker center 선
+            cv2.line(img, (cx_i, cy_i), (u, v), (255, 0, 255), 2)
+
+            # marker 중심 강조
+            cv2.circle(img, (u, v), 8, (0, 255, 255), 2)
+        except Exception as e:
+            self.get_logger().warn(
+                f"⚠️ Failed to draw marker-center relation: {repr(e)}"
+            )
+
     def _median_depth_m(self, cv_depth, encoding, u, v):
         try:
             r = self.depth_patch_size // 2
@@ -406,9 +476,7 @@ class Aruco3DNode(Node):
 
             patch = cv_depth[v0:v1, u0:u1]
             if patch.size == 0:
-                self.get_logger().warn(
-                    f"⚠️ Empty depth patch at (u,v)=({u},{v})"
-                )
+                self.get_logger().warn(f"⚠️ Empty depth patch at (u,v)=({u},{v})")
                 return None
 
             if "16UC1" in encoding:
@@ -424,9 +492,7 @@ class Aruco3DNode(Node):
                 return float(np.median(vals))
 
             else:
-                self.get_logger().error(
-                    f"❌ Unsupported depth encoding: {encoding}"
-                )
+                self.get_logger().error(f"❌ Unsupported depth encoding: {encoding}")
                 return None
 
         except Exception as e:
