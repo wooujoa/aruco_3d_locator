@@ -32,16 +32,13 @@ DICT_MAP = {
 }
 
 
-class Aruco3DNodeLeft(Node):
+class Aruco3DNode(Node):
     def __init__(self):
-        super().__init__("aruco_3d_node_left")
+        super().__init__("aruco_3d_node_right")
 
-        # ------------------------------------------------------------
-        # LEFT camera topics
-        # ------------------------------------------------------------
-        self.declare_parameter("color_topic", "/camera_l/camera_l/color/image_rect_raw/compressed")
-        self.declare_parameter("depth_topic", "/camera_l/camera_l/aligned_depth_to_color/image_raw")
-        self.declare_parameter("camera_info_topic", "/camera_l/camera_l/aligned_depth_to_color/camera_info")
+        self.declare_parameter("color_topic", "/camera_r/camera_r/color/image_rect_raw/compressed")
+        self.declare_parameter("depth_topic", "/camera_r/camera_r/aligned_depth_to_color/image_raw")
+        self.declare_parameter("camera_info_topic", "/camera_r/camera_r/aligned_depth_to_color/camera_info")
 
         self.declare_parameter("aruco_dict", "DICT_4X4_50")
         self.declare_parameter("target_marker_id", 0)
@@ -105,11 +102,11 @@ class Aruco3DNodeLeft(Node):
             CameraInfo, self.camera_info_topic, self.info_cb, qos_profile_sensor_data
         )
 
-        self.pub_point = self.create_publisher(PointStamped, "/aruco/marker_3d_l", 10)
-        self.pub_debug = self.create_publisher(Image, "/aruco/debug_image_l", 10)
+        self.pub_point = self.create_publisher(PointStamped, "/aruco/marker_3d_r", 10)
+        self.pub_debug = self.create_publisher(Image, "/aruco/debug_image_r", 10)
 
         self.get_logger().info("========================================")
-        self.get_logger().info("✅ ArUco 3D Node Started (LEFT ARM)")
+        self.get_logger().info("✅ ArUco 3D Node Started (RIGHT ARM)")
         self.get_logger().info(f"  color_topic                : {self.color_topic}")
         self.get_logger().info(f"  depth_topic                : {self.depth_topic}")
         self.get_logger().info(f"  camera_info_topic          : {self.camera_info_topic}")
@@ -342,7 +339,7 @@ class Aruco3DNodeLeft(Node):
 
                 self.detect_success_count += 1
                 self.get_logger().info(
-                    f"📍 Published marker_3d_l | "
+                    f"📍 Published marker_3d_r | "
                     f"ID={marker_id}, pixel=({u},{v}), "
                     f"xyz=({x_m:.4f}, {y_m:.4f}, {z_m:.4f}) m | "
                     f"stamp=color, frame={out.header.frame_id}, dt={dt_ms:.2f}ms"
@@ -494,7 +491,7 @@ class Aruco3DNodeLeft(Node):
 
 def main():
     rclpy.init()
-    node = Aruco3DNodeLeft()
+    node = Aruco3DNode()
 
     try:
         rclpy.spin(node)
