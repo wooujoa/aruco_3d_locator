@@ -39,7 +39,7 @@ class ArucoPoseNodeZed(Node):
         self.declare_parameter("target_marker_id", 1)
         
         # [핵심] 실제 인쇄된 마커의 검은 테두리 바깥쪽 한 변의 길이 (단위: 미터)
-        self.declare_parameter("marker_size", 0.05) 
+        self.declare_parameter("marker_size", 0.047) 
 
         self.declare_parameter("debug", True)
         self.declare_parameter("draw_camera_center", True)
