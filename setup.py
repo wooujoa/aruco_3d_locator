@@ -27,6 +27,8 @@ setup(
             'aruco_3d_node = aruco_3d_locator.aruco_3d_node:main',
             'aruco_3d_node_r = aruco_3d_locator.aruco_3d_node_r:main',
             'aruco_3d_node_zed = aruco_3d_locator.aruco_3d_node_zed:main',
+            'aruco_3d_neural_zed = aruco_3d_locator.aruco_3d_neural_zed:main',
+            'ARUCO_ZED = aruco_3d_locator.ARUCO_ZED:main',
         ],
     },
 )
