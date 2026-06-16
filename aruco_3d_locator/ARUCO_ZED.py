@@ -75,7 +75,7 @@ class ArucoZedNode(Node):
         self.declare_parameter("default_target_marker_id", -1)
 
         # 실제 인쇄된 마커의 검은 테두리 바깥쪽 한 변 길이 [m]
-        self.declare_parameter("marker_size", 0.05)
+        self.declare_parameter("marker_size", 0.04)
 
         # item DB fallback용. Local PC에 DB가 없더라도 /target_aruco_id를 받으면 동작함.
         self.declare_parameter("use_item_database", False)
